@@ -3,6 +3,9 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
+const CENTER_X: i32 = 24;
+const CENTER_Y: i32 = 44;
+
 mod protocol;
 use protocol::*;
 
@@ -115,19 +118,60 @@ async fn main() {
                         if hero.owner_id == my_id {
                             println!("This is your hero!");
 
-                            if let Err(e) = send_command(
-                                &mut write,
-                                WebSocketMessage {
-                                    command: Command::Move,
-                                    args: serde_json::to_value(MoveArgs {
-                                        hero_id: hero.id,
-                                        x: hero.x + 3, // move right
-                                        y: hero.y - 3,
-                                    }).unwrap(),
-                                },
-                            ).await {
-                                println!("Failed to send move command: {e}");
-                                return;
+                            let mut new_x = hero.x;
+                            let mut new_y = hero.y;
+
+                            if hero.x < CENTER_X { new_x += 3; }
+                            else if hero.x > CENTER_X { new_x -= 3; }
+
+                            if hero.y < CENTER_Y { new_y += 3; }
+                            else if hero.y > CENTER_Y { new_y -= 3; }
+
+                            //If there are no enemy heroes, move towards the center of the map
+                            if turn_args.state.heroes.iter().all(|hero| hero.owner_id == my_id) {
+                                if let Err(e) = send_command(
+                                    &mut write,
+                                    WebSocketMessage {
+                                        command: Command::Move,
+                                        args: serde_json::to_value(MoveArgs {
+                                            hero_id: hero.id,
+                                            x: new_x,
+                                            y: new_y,
+                                        }).unwrap(),
+                                    },
+                                ).await {
+                                    println!("Failed to send move command: {e}");
+                                    return;
+                                }
+                            } else {
+                                //Shoot the closest enemy hero
+                                let mut closest_enemy: Option<&Hero> = None;
+                                let mut min_distance = f32::INFINITY;
+
+                                for other_hero in &turn_args.state.heroes {
+                                    if other_hero.owner_id != my_id && other_hero.owner_id != hero.owner_id {
+                                        let dist = (((other_hero.x - hero.x).pow(2) + (other_hero.y - hero.y).pow(2)) as f32).sqrt();
+                                        if dist < min_distance {
+                                            closest_enemy = Some(other_hero);
+                                            min_distance = dist;
+                                        }
+                                    }
+                                }
+
+                                if let Some(enemy) = closest_enemy {
+                                    // Shoot towards enemy position
+                                    if let Err(e) = send_command(&mut write, WebSocketMessage {
+                                        command: Command::Shoot,
+                                        args: serde_json::to_value(ShootArgs {
+                                            hero_id: hero.id,
+                                            x: enemy.x,
+                                            y: enemy.y,
+                                        }).unwrap(),
+                                    }).await {
+                                        println!("Failed to send shoot command: {e}");
+                                        return;
+                                    }
+                                }
                             }
                         }
                     }
@@ -145,6 +189,10 @@ async fn main() {
             Command::EndMatch => 
             {
                 println!("Match ended!");
+                if let Err(e) = write.send(Message::Close(None)).await {
+                    println!("Failed to send close frame: {e}");
+                }
+                break;
             },
         }
     }
