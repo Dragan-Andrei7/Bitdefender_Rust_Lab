@@ -1,13 +1,24 @@
+//https://bitdefenders.cvjd.me/web/index.html
+
 use anyhow::Context;
 use futures_util::{SinkExt, StreamExt};
-use serde::{Deserialize, Serialize};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 const CENTER_X: i32 = 24;
 const CENTER_Y: i32 = 44;
 
+const GRID_WIDTH: usize = 17;
+const GRID_HEIGHT: usize = 30;
+
 mod protocol;
 use protocol::*;
+
+mod grid;
+use grid::*;
+
+mod hero;
+use hero::*;
+
 
 async fn send_command<
     S: SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
@@ -23,6 +34,8 @@ async fn send_command<
     Ok(())
 }
 
+
+
 #[tokio::main]
 async fn main() {
     let url = "wss://bitdefenders.cvjd.me/ws";
@@ -32,29 +45,31 @@ async fn main() {
     println!("connected");
     let mut my_id: Option<i32> = None;
 
+    let mut grid: Grid = Grid::new(GRID_WIDTH, GRID_HEIGHT);
+
     while let Some(msg) = read.next().await {
         let msg = msg.unwrap();
 
         let text = match msg {
-        Message::Text(text) => text,
-        Message::Ping(payload) => {
-            write.send(Message::Pong(payload)).await.unwrap();
-            continue;
-        }
-        Message::Pong(_) => {
-            println!("pong");
-            continue;
-        }
-        Message::Binary(_) => {
-            println!("binary message ignored");
-            continue;
-        }
-        Message::Close(frame) => {
-            println!("closed: {frame:?}");
-            break;
-        }
-        Message::Frame(_) => continue,
-    };
+            Message::Text(text) => text,
+            Message::Ping(payload) => {
+                write.send(Message::Pong(payload)).await.unwrap();
+                continue;
+            }
+            Message::Pong(_) => {
+                println!("pong");
+                continue;
+            }
+            Message::Binary(_) => {
+                println!("binary message ignored");
+                continue;
+            }
+            Message::Close(frame) => {
+                println!("closed: {frame:?}");
+                break;
+            }
+            Message::Frame(_) => continue,
+        };
 
         
         let message: WebSocketMessage = serde_json::from_str(text.as_ref()).unwrap();
@@ -77,7 +92,7 @@ async fn main() {
             }
             Command::Login => {
                 panic!("What are you doing here?");
-            },
+            }
             Command::Error => {
                 println!("Error: {message:?}");
                 break;
@@ -96,10 +111,10 @@ async fn main() {
                     println!("Failed to send practice command: {e}");
                     break;
                 }
-            },
+            }
             Command::Practice => {
                 println!("Something went wrong, server should not send practice command");
-            },
+            }
             Command::Challenge => {
                 println!("Something went wrong, server should not send challenge command");
             }
@@ -111,6 +126,9 @@ async fn main() {
             Command::StartTurn => {
                 println!("Your turn!");
                 let turn_args: StartTurnArgs = serde_json::from_value(message.args).unwrap();
+                
+                grid.update_grid(&turn_args.state.heroes, &turn_args.state.walls);
+                grid.print_grid();
 
                 if let Some(my_id) = my_id {
                     for hero in turn_args.state.heroes.iter() {
@@ -118,14 +136,7 @@ async fn main() {
                         if hero.owner_id == my_id {
                             println!("This is your hero!");
 
-                            let mut new_x = hero.x;
-                            let mut new_y = hero.y;
-
-                            if hero.x < CENTER_X { new_x += 3; }
-                            else if hero.x > CENTER_X { new_x -= 3; }
-
-                            if hero.y < CENTER_Y { new_y += 3; }
-                            else if hero.y > CENTER_Y { new_y -= 3; }
+                            let (new_x, new_y) = Hero_s::new(hero).hero_logic(&grid);
 
                             //If there are no enemy heroes, move towards the center of the map
                             if turn_args.state.heroes.iter().all(|hero| hero.owner_id == my_id) {
@@ -179,21 +190,20 @@ async fn main() {
                     println!("Player id not set yet.");
                 }
 
-            },
+            }
             Command::Move => {
                 println!("Something went wrong, server should not send move command");
-            },
+            }
             Command::Shoot => {
                 println!("Something went wrong, server should not send shoot command");
-            },
-            Command::EndMatch => 
-            {
+            }
+            Command::EndMatch => {
                 println!("Match ended!");
                 if let Err(e) = write.send(Message::Close(None)).await {
                     println!("Failed to send close frame: {e}");
                 }
                 break;
-            },
+            }
         }
     }
 }
