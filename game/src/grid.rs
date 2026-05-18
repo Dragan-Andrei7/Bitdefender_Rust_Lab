@@ -99,4 +99,106 @@ impl Grid {
         }
         false // No enemy heroes found
     }
+
+    pub fn dimensions(&self) -> (usize, usize) {
+        (self.width, self.height)
+    }
+
+    pub fn world_to_cell(&self, x: i32, y: i32) -> Option<(usize, usize)> {
+        if x <= 0 || y <= 0 {
+            return None;
+        }
+
+        let cell_x = ((x as usize) - 1) / 3;
+        let cell_y = ((y as usize) - 1) / 3;
+
+        if cell_x < self.width && cell_y < self.height {
+            Some((cell_x, cell_y))
+        } else {
+            None
+        }
+    }
+
+    pub fn cell_to_world(&self, cell_x: usize, cell_y: usize) -> (i32, i32) {
+        ((cell_x as i32) * 3 + 1, (cell_y as i32) * 3 + 1)
+    }
+
+    pub fn is_walkable_cell(&self, cell_x: usize, cell_y: usize) -> bool {
+        if cell_x >= self.width || cell_y >= self.height {
+            return false;
+        }
+
+        matches!(self.cells[cell_y][cell_x], Cell::Empty | Cell::LastSeenEnemy(_))
+    }
+
+    pub fn is_wall_cell(&self, cell_x: usize, cell_y: usize) -> bool {
+        if cell_x >= self.width || cell_y >= self.height {
+            return false;
+        }
+
+        matches!(self.cells[cell_y][cell_x], Cell::Wall)
+    }
+
+    pub fn bresenham_line(&self, start: (usize, usize), end: (usize, usize)) -> Vec<(usize, usize)> {
+        let mut points = Vec::new();
+
+        let (x0, y0) = (start.0 as i32, start.1 as i32);
+        let (x1, y1) = (end.0 as i32, end.1 as i32);
+
+        let dx = (x1 - x0).abs();
+        let dy = -(y1 - y0).abs();
+        let sx = if x0 < x1 { 1 } else { -1 };
+        let sy = if y0 < y1 { 1 } else { -1 };
+        let mut err = dx + dy;
+
+        let mut x = x0;
+        let mut y = y0;
+
+        loop {
+            if x >= 0 && y >= 0 && (x as usize) < self.width && (y as usize) < self.height {
+                points.push((x as usize, y as usize));
+            }
+
+            if x == x1 && y == y1 {
+                break;
+            }
+
+            let e2 = 2 * err;
+            if e2 >= dy {
+                err += dy;
+                x += sx;
+            }
+            if e2 <= dx {
+                err += dx;
+                y += sy;
+            }
+        }
+
+        points
+    }
+
+    pub fn cardinal_neighbors(&self, cell_x: usize, cell_y: usize) -> Vec<(usize, usize)> {
+        // Return 8-directional neighbors (including diagonals), skipping out-of-bounds
+        let mut neighbors = Vec::with_capacity(8);
+
+        for dy in -1i32..=1 {
+            for dx in -1i32..=1 {
+                if dx == 0 && dy == 0 {
+                    continue;
+                }
+
+                let nx = (cell_x as i32) + dx;
+                let ny = (cell_y as i32) + dy;
+
+                if nx >= 0 && ny >= 0 {
+                    let (nxu, nyu) = (nx as usize, ny as usize);
+                    if nxu < self.width && nyu < self.height {
+                        neighbors.push((nxu, nyu));
+                    }
+                }
+            }
+        }
+
+        neighbors
+    }
 }
