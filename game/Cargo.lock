@@ -264,6 +264,7 @@ dependencies = [
  "anyhow",
  "clap",
  "futures-util",
+ "rand",
  "rustls",
  "serde",
  "serde_json",

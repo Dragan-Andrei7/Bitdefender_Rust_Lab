@@ -98,7 +98,6 @@ async fn main() {
 
     println!("connected");
     let mut my_id: Option<i32> = None;
-    let mut cooldown: i32 = 0;
 
     let mut grid: Grid = Grid::new(GRID_WIDTH, GRID_HEIGHT);
     let mut heroes_map: HashMap<i32, Hero_s> = HashMap::new();
@@ -187,8 +186,6 @@ async fn main() {
             Command::StartTurn => {
                 println!("Your turn!");
                 let turn_args: StartTurnArgs = serde_json::from_value(message.args).unwrap();
-
-                if cooldown > 0 {cooldown -= 1;}
                 
                 grid.update_grid(&turn_args.state.heroes, &turn_args.state.walls);
                 grid.print_grid();
@@ -266,24 +263,21 @@ async fn main() {
                                 }
 
                                 if let Some(enemy) = closest_enemy {
-                                    if entry.planned_moves.is_empty() {
-                                        if !entry.plan_retreat_from_enemy(&grid, enemy) {
-                                            // Fallback to a direct step away if no path can be planned.
-                                            let (escape_x, escape_y) = entry.move_away_from(enemy);
-                                            entry.planned_moves.push_back((escape_x, escape_y));
-                                        }
-                                    }
+                                    let (new_x, new_y, should_shoot) = entry.plan_keep_distance_from_enemy(
+                                        &grid,
+                                        enemy,
+                                        hero.cooldown,
+                                        &turn_args.state.projectiles,
+                                    );
 
-                                    let can_shoot = cooldown == 0 && entry.validate_shoot(&grid, enemy.x, enemy.y);
-
-                                    if can_shoot {
-                                        cooldown = 5; // Set cooldown after shooting
+                                    if should_shoot {
+                                        let (shoot_x, shoot_y) = entry.shoot_target_beyond_enemy(&grid, enemy);
                                         if let Err(e) = send_command(&mut write, WebSocketMessage {
                                             command: Command::Shoot,
                                             args: serde_json::to_value(ShootArgs {
                                                 hero_id: hero.id,
-                                                x: enemy.x,
-                                                y: enemy.y,
+                                                x: shoot_x,
+                                                y: shoot_y,
                                                 comment: Some("shoot_enemy".to_string()),
                                             }).unwrap(),
                                         }).await {
@@ -291,24 +285,22 @@ async fn main() {
                                             return;
                                         }
                                     } else {
-                                        if let Some((escape_x, escape_y)) = entry.planned_moves.pop_front() {
-                                            if let Err(e) = send_command(
-                                                &mut write,
-                                                WebSocketMessage {
-                                                    command: Command::Move,
-                                                    args: serde_json::to_value(MoveArgs {
-                                                        hero_id: hero.id,
-                                                        x: escape_x,
-                                                        y: escape_y,
-                                                        comment: Some("retreat".to_string()),
-                                                    }).unwrap(),
-                                                },
-                                            ).await {
-                                                println!("Failed to send move command: {e}");
-                                                return;
-                                            }
+                                        if let Err(e) = send_command(
+                                            &mut write,
+                                            WebSocketMessage {
+                                                command: Command::Move,
+                                                args: serde_json::to_value(MoveArgs {
+                                                    hero_id: hero.id,
+                                                    x: new_x,
+                                                    y: new_y,
+                                                    comment: Some("combat_move".to_string()),
+                                                }).unwrap(),
+                                            },
+                                        ).await {
+                                            println!("Failed to send move command: {e}");
+                                            return;
                                         }   
-                                    }                                    
+                                    }
                                 }
                             }
                         }

@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 
-use crate::{grid::Grid, protocol::Hero};
+use crate::{grid::Grid, protocol::{Hero, Projectile}};
+use rand::{seq::SliceRandom, thread_rng};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeroState {
@@ -56,6 +57,199 @@ impl Hero_s {
         let clamped_y = new_y.max(1).min(88);
         
         (clamped_x, clamped_y)
+    }
+
+    pub fn distance_to(&self, other: &Hero) -> i32 {
+        let my_cell_x = (self.hero.x - 1) / 3;
+        let my_cell_y = (self.hero.y - 1) / 3;
+        let other_cell_x = (other.x - 1) / 3;
+        let other_cell_y = (other.y - 1) / 3;
+
+        (my_cell_x - other_cell_x).abs().max((my_cell_y - other_cell_y).abs())
+    }
+
+    fn current_cell(&self, grid: &Grid) -> Option<(usize, usize)> {
+        grid.world_to_cell(self.hero.x, self.hero.y)
+    }
+
+    fn candidate_cells(&self, grid: &Grid) -> Vec<(usize, usize)> {
+        let Some((cell_x, cell_y)) = self.current_cell(grid) else {
+            return Vec::new();
+        };
+
+        let mut candidates = Vec::with_capacity(9);
+        candidates.push((cell_x, cell_y));
+        candidates.extend(grid.cardinal_neighbors(cell_x, cell_y));
+        candidates.retain(|(next_x, next_y)| grid.is_walkable_cell(*next_x, *next_y));
+        candidates
+    }
+
+    fn cell_distance_to_enemy(cell: (usize, usize), grid: &Grid, enemy: &Hero) -> i32 {
+        let Some(enemy_cell) = grid.world_to_cell(enemy.x, enemy.y) else {
+            return i32::MAX;
+        };
+
+        (cell.0 as i32 - enemy_cell.0 as i32).abs().max((cell.1 as i32 - enemy_cell.1 as i32).abs())
+    }
+
+    fn choose_random_best_cell<F>(&self, grid: &Grid, score_fn: F) -> Option<(usize, usize)>
+    where
+        F: Fn((usize, usize)) -> i32,
+    {
+        let mut best_cells: Vec<(usize, usize)> = Vec::new();
+        let mut best_score: Option<i32> = None;
+
+        for cell in self.candidate_cells(grid) {
+            let score = score_fn(cell);
+            match best_score {
+                None => {
+                    best_score = Some(score);
+                    best_cells.push(cell);
+                }
+                Some(current_best) if score > current_best => {
+                    best_score = Some(score);
+                    best_cells.clear();
+                    best_cells.push(cell);
+                }
+                Some(current_best) if score == current_best => {
+                    best_cells.push(cell);
+                }
+                _ => {}
+            }
+        }
+
+        best_cells.choose(&mut thread_rng()).copied()
+    }
+
+    fn move_towards_enemy(&mut self, grid: &Grid, enemy: &Hero) -> (i32, i32) {
+        let Some(best_cell) = self
+            .choose_random_best_cell(grid, |cell| {
+                let dist = Self::cell_distance_to_enemy(cell, grid, enemy);
+                let manhattan = (cell.0 as i32 - enemy.x).abs() + (cell.1 as i32 - enemy.y).abs();
+                -dist * 100 - manhattan
+            })
+        else {
+            return (self.hero.x, self.hero.y);
+        };
+
+        grid.cell_to_world(best_cell.0, best_cell.1)
+    }
+
+    fn move_away_from_enemy(&mut self, grid: &Grid, enemy: &Hero) -> (i32, i32) {
+        let Some(best_cell) = self
+            .choose_random_best_cell(grid, |cell| {
+                let dist = Self::cell_distance_to_enemy(cell, grid, enemy);
+                let manhattan = (cell.0 as i32 - enemy.x).abs() + (cell.1 as i32 - enemy.y).abs();
+                dist * 100 - manhattan
+            })
+        else {
+            return (self.hero.x, self.hero.y);
+        };
+
+        grid.cell_to_world(best_cell.0, best_cell.1)
+    }
+
+    fn keep_distance_from_enemy(&mut self, grid: &Grid, enemy: &Hero) -> (i32, i32) {
+        let Some(best_cell) = self
+            .choose_random_best_cell(grid, |cell| {
+                let dist = Self::cell_distance_to_enemy(cell, grid, enemy);
+                let band_score = 3 - (dist - 3).abs();
+                band_score * 100 - dist
+            })
+        else {
+            return (self.hero.x, self.hero.y);
+        };
+
+        grid.cell_to_world(best_cell.0, best_cell.1)
+    }
+
+    fn projectile_is_threat(&self, grid: &Grid, projectile: &Projectile) -> bool {
+        let Some(hero_cell) = grid.world_to_cell(self.hero.x, self.hero.y) else {
+            return false;
+        };
+        let Some(projectile_cell) = grid.world_to_cell(projectile.x, projectile.y) else {
+            return false;
+        };
+
+        let dx = (hero_cell.0 as i32 - projectile_cell.0 as i32).abs();
+        let dy = (hero_cell.1 as i32 - projectile_cell.1 as i32).abs();
+        if !(dx == 0 || dy == 0 || dx == dy) {
+            return false;
+        }
+
+        let line = grid.bresenham_line(projectile_cell, hero_cell);
+        for (index, (cell_x, cell_y)) in line.iter().enumerate() {
+            if index == 0 || index + 1 == line.len() {
+                continue;
+            }
+
+            if grid.is_wall_cell(*cell_x, *cell_y) {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    fn dodge_projectiles(&mut self, grid: &Grid, enemy: &Hero, projectiles: &[Projectile]) -> (i32, i32) {
+        let Some(best_cell) = self
+            .choose_random_best_cell(grid, |cell| {
+                let projectile_distance = projectiles
+                    .iter()
+                    .filter(|projectile| projectile.owner_id != self.hero.owner_id && self.projectile_is_threat(grid, projectile))
+                    .filter_map(|projectile| grid.world_to_cell(projectile.x, projectile.y))
+                    .map(|projectile_cell| {
+                        (cell.0 as i32 - projectile_cell.0 as i32)
+                            .abs()
+                            .max((cell.1 as i32 - projectile_cell.1 as i32).abs())
+                    })
+                    .min()
+                    .unwrap_or(i32::MAX / 2);
+
+                let enemy_distance = Self::cell_distance_to_enemy(cell, grid, enemy);
+                let band_score = 3 - (enemy_distance - 3).abs();
+                projectile_distance * 100 + band_score * 10 - enemy_distance
+            })
+        else {
+            return (self.hero.x, self.hero.y);
+        };
+
+        grid.cell_to_world(best_cell.0, best_cell.1)
+    }
+
+    pub fn plan_keep_distance_from_enemy(&mut self, grid: &Grid, enemy: &Hero, cooldown: i32, projectiles: &[Projectile]) -> (i32, i32, bool) {
+        let threatened = projectiles.iter().any(|projectile| {
+            projectile.owner_id != self.hero.owner_id && self.projectile_is_threat(grid, projectile)
+        });
+
+        if threatened {
+            let (x, y) = self.dodge_projectiles(grid, enemy, projectiles);
+            return (x, y, false);
+        }
+
+        let distance = self.distance_to(enemy);
+
+        if cooldown == 0 {
+            if distance <= 3 && self.validate_shoot(grid, enemy.x, enemy.y) {
+                return (self.hero.x, self.hero.y, true);
+            }
+
+            if distance > 3 {
+                let (x, y) = self.move_towards_enemy(grid, enemy);
+                return (x, y, false);
+            }
+
+            let (x, y) = self.keep_distance_from_enemy(grid, enemy);
+            return (x, y, false);
+        }
+
+        if distance >= 3 {
+            let (x, y) = self.move_towards_enemy(grid, enemy);
+            return (x, y, false);
+        }
+
+        let (x, y) = self.keep_distance_from_enemy(grid, enemy);
+        (x, y, false)
     }
 
     pub fn plan_retreat_from_enemy(&mut self, grid: &Grid, enemy: &Hero) -> bool {
@@ -186,6 +380,49 @@ impl Hero_s {
         }
 
         true
+    }
+
+    pub fn shoot_target_beyond_enemy(&self, grid: &Grid, enemy: &Hero) -> (i32, i32) {
+        let Some(start_cell) = grid.world_to_cell(self.hero.x, self.hero.y) else {
+            return (enemy.x, enemy.y);
+        };
+        let Some(enemy_cell) = grid.world_to_cell(enemy.x, enemy.y) else {
+            return (enemy.x, enemy.y);
+        };
+
+        let step_x = (enemy_cell.0 as i32 - start_cell.0 as i32).signum();
+        let step_y = (enemy_cell.1 as i32 - start_cell.1 as i32).signum();
+
+        if step_x == 0 && step_y == 0 {
+            return (enemy.x, enemy.y);
+        }
+
+        let mut best_cell = enemy_cell;
+        let mut current_cell = enemy_cell;
+
+        loop {
+            let next_x = current_cell.0 as i32 + step_x;
+            let next_y = current_cell.1 as i32 + step_y;
+
+            if next_x < 0 || next_y < 0 {
+                break;
+            }
+
+            let next_cell = (next_x as usize, next_y as usize);
+            if next_cell.0 >= grid.dimensions().0 || next_cell.1 >= grid.dimensions().1 {
+                break;
+            }
+
+            let next_world = grid.cell_to_world(next_cell.0, next_cell.1);
+            if !self.validate_shoot(grid, next_world.0, next_world.1) {
+                break;
+            }
+
+            best_cell = next_cell;
+            current_cell = next_cell;
+        }
+
+        grid.cell_to_world(best_cell.0, best_cell.1)
     }
 
     pub fn validate_path(&mut self, grid: &Grid) {
